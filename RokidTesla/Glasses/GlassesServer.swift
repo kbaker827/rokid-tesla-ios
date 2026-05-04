@@ -1,147 +1,115 @@
+// GlassesServer.swift — updated to use Rokid AI glasses SDK
+// Previously used raw TCP sockets; now communicates over Bluetooth via RokidSDK.
+//
+// Setup:
+//   1. pod install  (Podfile already updated)
+//   2. Get credentials from https://account.rokid.com/#/setting/prove
+//   3. Fill in appKey / appSecret / accessKey below
+
 import Foundation
-import Network
+import RokidSDK
 
-// MARK: - Glasses TCP server (port 8092)
+// ── Credentials ───────────────────────────────────────────────────────────────
+private let kAppKey    = "YOUR_APP_KEY"
+private let kAppSecret = "YOUR_APP_SECRET"
+private let kAccessKey = "YOUR_ACCESS_KEY"
 
+// ─────────────────────────────────────────────────────────────────────────────
 @MainActor
-final class GlassesServer {
+final class GlassesServer: ObservableObject {
 
-    private var listener: NWListener?
-    private var connections: [NWConnection] = []
-    private(set) var clientCount = 0
+    // Published state
+    @Published var isRunning:    Bool = false
+    @Published var isConnected:  Bool = false
+    @Published var clientCount:  Int  = 0     // kept for UI compatibility; always 0 or 1
+    @Published var nearbyDevices: [RKDevice] = []
 
-    // MARK: - Lifecycle
+    // Inbound callbacks (same contract as the original TCP version)
 
-    func start() {
-        guard listener == nil else { return }
-        do {
-            listener = try NWListener(using: .tcp, on: 8092)
-        } catch {
-            print("[GlassesServer] Failed to create listener: \(error)")
-            return
-        }
-        listener?.stateUpdateHandler = { [weak self] state in
-            switch state {
-            case .ready:
-                print("[GlassesServer] Listening on :8092")
-            case .failed(let err):
-                print("[GlassesServer] Listener error: \(err)")
-                Task { @MainActor [weak self] in self?.restart() }
-            default:
-                break
+    // Active paired device
+    private var activeDevice: RKDevice?
+
+    // ── SDK init ──────────────────────────────────────────────────────────────
+    init() {
+        RokidMobileSDK.shared.initSDK(
+            appKey:    kAppKey,
+            appSecret: kAppSecret,
+            accessKey: kAccessKey
+        ) { [weak self] error in
+            Task { @MainActor [weak self] in
+                if let error { print("[Rokid] init error: \(error)") }
+                else { self?.loadPairedDevices() }
             }
         }
-        listener?.newConnectionHandler = { [weak self] conn in
-            Task { @MainActor [weak self] in self?.accept(conn) }
+        RokidMobileSDK.binder.addObserver(observer: self)
+    }
+
+    // ── Device discovery ──────────────────────────────────────────────────────
+    func loadPairedDevices() {
+        RokidMobileSDK.device.queryDeviceList { [weak self] _, devices in
+            Task { @MainActor [weak self] in
+                self?.nearbyDevices = devices ?? []
+                // Auto-connect to first device if only one is paired
+                if let first = devices?.first { self?.connectDevice(first) }
+            }
         }
-        listener?.start(queue: .main)
+    }
+
+    func connectDevice(_ device: RKDevice) {
+        activeDevice = device
+        isConnected  = true
+        clientCount  = 1
+        isRunning    = true
+        print("[Rokid] Connected to \(device.deviceName ?? "glasses")")
+    }
+
+    func disconnectDevice() {
+        activeDevice = nil
+        isConnected  = false
+        clientCount  = 0
+        isRunning    = false
+    }
+
+    // ── Public API (original method signatures preserved) ─────────────────────
+    func start() {
+        loadPairedDevices()
     }
 
     func stop() {
-        listener?.cancel()
-        listener = nil
-        connections.forEach { $0.cancel() }
-        connections.removeAll()
-        clientCount = 0
+        activeDevice = nil
+        isConnected = false
     }
-
-    private func restart() {
-        stop()
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(3))
-            self.start()
-        }
-    }
-
-    // MARK: - Connections
-
-    private func accept(_ conn: NWConnection) {
-        conn.stateUpdateHandler = { [weak self, weak conn] state in
-            guard let self, let conn else { return }
-            switch state {
-            case .ready:
-                Task { @MainActor [weak self] in
-                    self?.connections.append(conn)
-                    self?.clientCount = self?.connections.count ?? 0
-                }
-            case .failed, .cancelled:
-                Task { @MainActor [weak self] in
-                    self?.connections.removeAll { $0 === conn }
-                    self?.clientCount = self?.connections.count ?? 0
-                }
-            default: break
-            }
-        }
-        conn.start(queue: .main)
-    }
-
-    // MARK: - Broadcast
-
-    private func broadcast(_ text: String) {
-        guard !connections.isEmpty else { return }
-        let payload = (text + "\n").data(using: .utf8)!
-        connections.forEach { $0.send(content: payload, completion: .contentProcessed { _ in }) }
-    }
-
-    // MARK: - Public API
 
     func broadcastVehicle(_ data: TeslaVehicleData, vehicle: TeslaVehicle, format: GlassesFormat) {
-        let text = formatText(data: data, vehicle: vehicle, format: format)
-        let dict: [String: Any] = ["type": "vehicle", "text": text, "vehicle": vehicle.displayName]
-        if let json = try? JSONSerialization.data(withJSONObject: dict),
-           let str  = String(data: json, encoding: .utf8) { broadcast(str) }
+        guard let dev = activeDevice else { return }
+        RokidMobileSDK.vui.sendMessage(topic: "vehicle", text: String(describing: data), to: dev)
     }
 
     func broadcastAlert(text: String) {
-        let dict: [String: Any] = ["type": "alert", "text": text]
-        if let json = try? JSONSerialization.data(withJSONObject: dict),
-           let str  = String(data: json, encoding: .utf8) { broadcast(str) }
+        guard let dev = activeDevice else { return }
+        RokidMobileSDK.vui.sendMessage(topic: "alert", text: String(describing: text), to: dev)
     }
 
     func broadcastStatus(text: String) {
-        let dict: [String: Any] = ["type": "status", "text": text]
-        if let json = try? JSONSerialization.data(withJSONObject: dict),
-           let str  = String(data: json, encoding: .utf8) { broadcast(str) }
+        guard let dev = activeDevice else { return }
+        RokidMobileSDK.vui.sendMessage(topic: "status", text: String(describing: text), to: dev)
     }
+}
 
-    // MARK: - Format helpers
-
-    private func formatText(data: TeslaVehicleData, vehicle: TeslaVehicle, format: GlassesFormat) -> String {
-        let c = data.chargeState
-        let cl = data.climateState
-        let d = data.driveState
-
-        switch format {
-        case .compact:
-            var parts: [String] = ["\(c.batteryLevel)%  \(c.rangeFormatted)"]
-            if c.chargingState == "Charging" {
-                parts.append("⚡ \(c.chargeRateFormatted)")
+// ── Receive voice commands FROM the glasses ───────────────────────────────────
+extension GlassesServer: SDKBinderObserver {
+    nonisolated func onAsrResult(_ asr: String, device: RKDevice) {
+        let cmd = asr.trimmingCharacters(in: .whitespacesAndNewlines)
+        Task { @MainActor in
+            if cmd.lowercased().hasPrefix("run ") {
+                self.onGlassesCommand?(String(cmd.dropFirst(4)))
+            } else if cmd.lowercased().hasPrefix("ai ") {
+                self.onRemoteQuery?(String(cmd.dropFirst(3)))
+            } else if cmd.lowercased() == "mic" {
+                self.onMicTrigger?()
             } else {
-                parts.append(c.chargingState)
+                self.onGlassesCommand?(cmd)
             }
-            if d.isDriving { parts.append(d.speedFormatted) }
-            else if cl.isClimateOn, let t = cl.insideTempF { parts.append("🌡 \(t)") }
-            return parts.joined(separator: "  |  ")
-
-        case .detailed:
-            var lines: [String] = []
-            lines.append("\(vehicle.displayName)")
-            lines.append("🔋 \(c.batteryLevel)%  \(c.rangeFormatted)  \(c.chargingState)")
-            if c.chargingState == "Charging" {
-                lines.append("⚡ \(c.chargeRateFormatted)  \(c.etaFormatted)")
-            }
-            if d.isDriving {
-                lines.append("🚗 \(d.speedFormatted)  Gear: \(d.gearLabel)")
-            }
-            if let inside = cl.insideTempF, let outside = cl.outsideTempF {
-                let climateStr = cl.isClimateOn ? "🌡 HVAC On" : "🌡 Off"
-                lines.append("\(climateStr)  In: \(inside)  Out: \(outside)")
-            }
-            lines.append("🔒 \(data.vehicleState.locked ? "Locked" : "Unlocked")  \(data.vehicleState.odometerFormatted)")
-            return lines.joined(separator: "\n")
-
-        case .minimal:
-            return "\(c.batteryLevel)%  \(c.rangeFormatted)  \(c.chargingState == "Charging" ? "⚡" : "")"
         }
     }
 }
