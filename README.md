@@ -84,7 +84,7 @@ The only thing left for each app is filling in the three credential constants (`
 
 ## Setup
 
-1. Open `RokidTesla.xcodeproj` in Xcode 15+.
+1. Open `RokidTesla.xcworkspace` in Xcode 15+ (after running `pod install`) 15+.
 2. Set your team in Signing & Capabilities.
 3. Build and run on iPhone (iOS 17+).
 4. Get a Tesla Fleet API access token:
@@ -124,4 +124,4 @@ Regional base URLs:
 - Xcode 15+
 - Tesla vehicle (any model with Fleet API access)
 - Tesla Fleet API access token
-- Rokid AR glasses on the same Wi-Fi (optional — app works standalone)
+- Rokid AI glasses (paired via Bluetooth — no Wi-Fi needed) (optional — app works standalone)
