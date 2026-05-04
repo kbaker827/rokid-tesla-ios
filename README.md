@@ -1,9 +1,15 @@
 # Rokid Tesla HUD
 
+
+> **🔵 Connectivity Update — May 2025**
+> The glasses connection has been migrated from **raw TCP sockets** to
+> **Bluetooth via the Rokid AI glasses SDK** (`pod 'RokidSDK' ~> 1.10.2`).
+> No Wi-Fi port forwarding is needed. See **SDK Setup** below.
+
 iOS app that connects to the **Tesla Fleet API** and streams live vehicle data to **Rokid AR glasses** (TCP :8092).
 
 ```
-Tesla Fleet API ──HTTPS──▶ iPhone (RokidTesla) ──TCP :8092──▶ Rokid Glasses
+Tesla Fleet API ──HTTPS──▶ iPhone (RokidTesla) ──Bluetooth/RokidSDK──▶ Rokid Glasses
 ```
 
 ## What's displayed
